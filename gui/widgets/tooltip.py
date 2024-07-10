@@ -4,17 +4,17 @@ from tkinter.ttk import Widget, Label
 
 class ToolTip:
     def __init__(self, widget: Widget):
-        self._widget = widget
+        self.widget = widget
         self._tip_window = None
 
     def showtip(self, text: str):
         if self._tip_window is not None:
             return
 
-        x, y, cx, cy = self._widget.bbox('insert')
-        x = x + self._widget.winfo_rootx() + 57
-        y = y + cy + self._widget.winfo_rooty() + 27
-        self._tip_window = Toplevel(self._widget)
+        x, y, cx, cy = self.widget.bbox('insert')
+        x = x + self.widget.winfo_rootx() + 57
+        y = y + cy + self.widget.winfo_rooty() + 27
+        self._tip_window = Toplevel(self.widget)
         self._tip_window.wm_overrideredirect(1)
         self._tip_window.wm_geometry('+%d+%d' % (x, y))
         label = Label(
@@ -26,3 +26,7 @@ class ToolTip:
         if self._tip_window:
             self._tip_window.destroy()
         self._tip_window = None
+
+    def destroy(self):
+        self.widget.destroy()
+        self.widget = None

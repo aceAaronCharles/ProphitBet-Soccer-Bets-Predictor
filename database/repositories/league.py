@@ -1,140 +1,120 @@
-import csv
-import json
 import os
+import pickle
+import shutil
 import pandas as pd
-from database.entities.league import League
-from database.network.netutils import check_internet_connection
-from database.network.footballdata.extra import ExtraLeagueAPI
-from database.network.footballdata.main import MainLeagueAPI
+from database.entities.leagues.league import League, LeagueConfig
+from database.network.downloaders.extra import ExtraLeagueDownloader
+from database.network.downloaders.main import MainLeagueDownloader
 from preprocessing.statistics import StatisticsEngine
 
 
 class LeagueRepository:
-    def __init__(self, available_leagues_filepath: str, saved_leagues_directory: str):
-        self._available_leagues_filepath = available_leagues_filepath
-        self._saved_leagues_directory = saved_leagues_directory
-
-        os.makedirs(self._saved_leagues_directory, exist_ok=True)
-
-    def get_all_available_leagues(self) -> dict:
-        with open(file=self._available_leagues_filepath, mode='r', encoding='utf=8') as csvfile:
-            reader = csv.reader(csvfile, delimiter=',')
-            next(reader)
-
-            return {(row[0], row[1]): League(
-                country=row[0],
-                name=row[1],
-                url=row[2],
-                year_start=int(row[3]),
-                league_type=row[4],
-                fixtures_url=row[5]
-            ) for row in reader}
-
-    def get_all_saved_leagues(self) -> list:
-        all_filepaths = os.listdir(self._saved_leagues_directory)
-        return list({os.path.basename(filepath).split(sep='.')[0] for filepath in all_filepaths})
-
-    @staticmethod
-    def get_all_available_columns() -> list:
-        return StatisticsEngine.Columns
-
-    def league_exists(self, league_name: str) -> bool:
-        league_filepath = f'{self._saved_leagues_directory}{league_name}.csv'
-        return os.path.exists(league_filepath)
-
-    def _store_league(
+    def __init__(
             self,
-            matches_df: pd.DataFrame,
-            league_config: dict,
-            league_name: str,
-            store_league_config: bool
-    ) -> pd.DataFrame:
-        matches_df = StatisticsEngine(
-            matches_df=matches_df,
-            last_n_matches=league_config['last_n_matches'],
-            goal_diff_margin=league_config['goal_diff_margin']
-        ).compute_statistics(statistic_columns=league_config['statistic_columns'])
+            leagues_directory: str,
+            leagues_index_filepath: str,
+            all_leagues_dict: dict[str, list]
+    ):
+        self._leagues_directory = leagues_directory
+        self._leagues_index_filepath = leagues_index_filepath
+        self._all_leagues_dict = all_leagues_dict
 
-        league_filepath = f'{self._saved_leagues_directory}{league_name}.csv'
-        matches_df.to_csv(league_filepath, index=False)
+        os.makedirs(name=leagues_directory, exist_ok=True)
 
-        if store_league_config:
-            league_config_filepath = f'{self._saved_leagues_directory}{league_name}.json'
-            with open(file=league_config_filepath, mode='w', encoding='utf-8') as fp:
-                json.dump(league_config, fp)
-        return matches_df
-
-    def create_league(
-            self,
-            league: League,
-            last_n_matches: int,
-            goal_diff_margin: int,
-            statistic_columns: list,
-            league_name: str
-    ) -> (pd.DataFrame, League) or (None, None):
-        if check_internet_connection() and not self.league_exists(league_name=league_name):
-            if league.league_type == 'main':
-                matches_df = MainLeagueAPI().download(league=league)
-            elif league.league_type == 'extra':
-                matches_df = ExtraLeagueAPI().download(league=league)
-            else:
-                raise NotImplementedError(f'League_type = {league.league_type} has not been implemented')
-
-            league_config = {
-                'country': league.country,
-                'name': league.name,
-                'last_n_matches': last_n_matches,
-                'goal_diff_margin': goal_diff_margin,
-                'statistic_columns': statistic_columns
-            }
-            return self._store_league(
-                matches_df=matches_df,
-                league_config=league_config,
-                league_name=league_name,
-                store_league_config=True
-            ), league
+        if not os.path.exists(leagues_index_filepath):
+            self._index = {}
         else:
-            return None, None
+            self._load_index()
 
-    def update_league(self, league_name: str) -> (pd.DataFrame, League) or (None, None):
-        if check_internet_connection() and self.league_exists(league_name=league_name):
-            config_filepath = f'{self._saved_leagues_directory}{league_name}.json'
-            with open(config_filepath, 'r', encoding='utf-8') as fp:
-                league_config = json.load(fp)
+    @property
+    def all_leagues_dict(self) -> dict[str, list[League]]:
+        return self._all_leagues_dict
 
-            if self.delete_league(league_name=league_name):
-                league_key = (league_config['country'], league_config['name'])
-                league = self.get_all_available_leagues()[league_key]
-                return self.create_league(
-                    league=league,
-                    last_n_matches=league_config['last_n_matches'],
-                    goal_diff_margin=league_config['goal_diff_margin'],
-                    statistic_columns=league_config['statistic_columns'],
-                    league_name=league_name
-                )
-            else:
-                return None, None
+    @property
+    def index(self) -> dict[str, LeagueConfig]:
+        return self._index
+
+    def _save_index(self):
+        with open(self._leagues_index_filepath, 'wb') as pklfile:
+            pickle.dump(self._index, pklfile)
+
+    def _load_index(self):
+        with open(self._leagues_index_filepath, 'rb') as pklfile:
+            self._index = pickle.load(pklfile)
+
+    def _get_league_directory(self, league_id: str) -> str:
+        return f'{self._leagues_directory}/{league_id}'
+
+    def get_created_leagues(self) -> list[str]:
+        return [] if len(self._index) == 0 else sorted(self._index.keys())
+
+    def get_league_config(self, league_id: str) -> LeagueConfig:
+        return self._index[league_id]
+
+    def _download_league_data(self, league_config: LeagueConfig, year_start: int):
+        league = league_config.league
+
+        if league.category == 'main':
+            df = MainLeagueDownloader().download(league=league, year_start=year_start)
+        elif league.category == 'extra':
+            df = ExtraLeagueDownloader().download(league=league, year_start=year_start)
         else:
-            return None, None
+            raise NotImplementedError(f'Not implemented league category: "{league.category}"')
 
-    def load_league(self, league_name: str) -> (pd.DataFrame, League) or (None, None):
-        if self.league_exists(league_name=league_name):
-            matches_df = pd.read_csv(f'{self._saved_leagues_directory}{league_name}.csv')
+        if df is not None:
+            stats_engine = StatisticsEngine(
+                match_history_window=league_config.match_history_window,
+                goal_diff_margin=league_config.goal_diff_margin
+            )
+            df = stats_engine.compute_statistics(matches_df=df, features=league_config.features)
 
-            with open(f'{self._saved_leagues_directory}{league_name}.json', 'r', encoding='utf-8') as fp:
-                league_config = json.load(fp)
-            league = self.get_all_available_leagues()[(league_config['country'], league_config['name'])]
-            return matches_df, league
+        columns_to_drop = [col for col in ['1', 'X', '2'] if col not in league_config.features]
+        if len(columns_to_drop) > 0:
+            df.drop(columns=columns_to_drop, inplace=True)
+        return df
+
+    def create_league(self, league_config: LeagueConfig) -> pd.DataFrame or None:
+        df = self._download_league_data(league_config=league_config, year_start=league_config.league.year_start)
+
+        if df is not None:
+            self.save_league(df=df, league_config=league_config)
+
+        return df
+
+    def update_league(self, league_id: str) -> pd.DataFrame or None:
+        league_config = self._index[league_id]
+        history_df = self.load_league(league_id=league_id)
+        last_season = history_df.iloc[-1]['Season']
+        update_df = self._download_league_data(league_config=league_config, year_start=last_season)
+
+        if update_df is not None:
+            df = pd.concat((update_df, history_df[history_df['Season'] < last_season]), axis=0, ignore_index=True)
+            self.save_league(df=df, league_config=league_config)
         else:
-            return None, None
+            df = history_df
 
-    def delete_league(self, league_name: str) -> bool:
-        league_filepath = f'{self._saved_leagues_directory}{league_name}.csv'
-        league_config_filepath = f'{self._saved_leagues_directory}{league_name}.json'
+        return df
 
-        if os.path.exists(league_filepath):
-            os.remove(league_filepath)
-            os.remove(league_config_filepath)
-            return True
+    def save_league(self, df: pd.DataFrame, league_config: LeagueConfig):
+        leagues_directory = self._get_league_directory(league_id=league_config.league_id)
+        os.makedirs(name=leagues_directory, exist_ok=True)
+        df.to_csv(f'{leagues_directory}/dataset.csv', index=False)
+
+        self._index[league_config.league_id] = league_config
+        self._save_index()
+
+    def load_league(self, league_id: str) -> pd.DataFrame or None:
+        leagues_directory = self._get_league_directory(league_id=league_id)
+        league_dataset_filepath = f'{leagues_directory}/dataset.csv'
+
+        if os.path.exists(league_dataset_filepath):
+            return pd.read_csv(league_dataset_filepath)
         else:
-            return False
+            self.delete_league(league_id=league_id)
+            return None
+
+    def delete_league(self, league_id: str):
+        shutil.rmtree(self._get_league_directory(league_id=league_id), ignore_errors=True)
+        del self._index[league_id]
+
+        self._save_index()

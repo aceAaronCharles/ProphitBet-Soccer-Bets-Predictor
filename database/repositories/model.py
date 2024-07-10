@@ -1,59 +1,86 @@
 import os
+import pickle
 import shutil
-from models.model import Model
-from models.tf.nn import FCNet
-from models.scikit.rf import RandomForest
+from models.model import ScikitModel, ModelConfig
 
 
 class ModelRepository:
-    def __init__(self, models_checkpoint_directory: str):
-        self._models_checkpoint_directory = models_checkpoint_directory
+    def __init__(self, models_directory: str, models_index_filepath: str):
+        self._models_directory = models_directory
+        self._models_index_filepath = models_index_filepath
 
-        os.makedirs(name=models_checkpoint_directory, exist_ok=True)
+        os.makedirs(name=models_directory, exist_ok=True)
 
-    def store_model(self, model: Model, league_name: str):
-        checkpoint_directory = f'{self._models_checkpoint_directory}/{league_name}'
+        if not os.path.exists(models_index_filepath):
+            self._index = {}
+        else:
+            self._load_index()
+
+    @property
+    def index(self) -> dict[str, dict[str, dict[str, ModelConfig]]]:
+        return self._index
+
+    def _save_index(self):
+        with open(self._models_index_filepath, 'wb') as pklfile:
+            pickle.dump(self._index, pklfile)
+
+    def _load_index(self):
+        with open(self._models_index_filepath, 'rb') as pklfile:
+            self._index = pickle.load(pklfile)
+
+    def get_model_configs(self, league_id: str) -> dict[str, dict[str, ModelConfig]]:
+        return {} if league_id not in self._index else self._index[league_id]
+
+    def update_model_config(self, model_config: ModelConfig):
+        self._index[model_config.league_id][model_config.task.name][model_config.model_id] = model_config
+        self._save_index()
+
+    def save_model(self, model: ScikitModel, model_config: ModelConfig):
+        if model_config.league_id not in self._index:
+            self._index.update({model_config.league_id: {}})
+
+        if model_config.task.name not in self._index[model_config.league_id]:
+            self._index[model_config.league_id].update({model_config.task.name: {}})
+
+        self._index[model_config.league_id][model_config.task.name][model_config.model_id] = model_config
+        self._save_index()
+
+        checkpoint_directory = f'{self._models_directory}/{model_config.league_id}/{model_config.task.name}/{model.model_id}'
         os.makedirs(name=checkpoint_directory, exist_ok=True)
+        model.save(checkpoint_directory=checkpoint_directory)
 
-        model.save(f'{checkpoint_directory}/{model.get_model_name()}')
-
-    def get_all_models(self, league_name: str) -> list or None:
-        checkpoint_directory = f'{self._models_checkpoint_directory}/{league_name}/'
-        if not os.path.exists(checkpoint_directory):
-            return None
-        else:
-            model_names = os.listdir(checkpoint_directory)
-            return [name.split('.')[0] for name in model_names]
-
-    def load_model(
-            self,
-            league_name: str,
-            model_name: str,
-            input_shape: tuple,
-            random_seed: int,
-    ) -> Model or None:
-        if model_name == 'rf':
-            model_name += '.pickle'
-        checkpoint_filepath = f'{self._models_checkpoint_directory}/{league_name}/{model_name}'
-
-        if os.path.exists(checkpoint_filepath):
-            if model_name == 'nn':
-                model = FCNet(input_shape=input_shape, random_seed=random_seed)
-            elif model_name == 'rf.pickle':
-                model = RandomForest(input_shape=input_shape, random_seed=random_seed)
-            else:
-                raise NotImplementedError(f'Type of model "{model_name}" has not been implemented yet')
-        else:
-            return None
-
-        model.load(checkpoint_filepath=checkpoint_filepath)
+    def load_model(self, model_config: ModelConfig) -> ScikitModel:
+        checkpoint_directory = f'{self._models_directory}/{model_config.league_id}/{model_config.task.name}/{model_config.model_id}'
+        model = model_config.model_cls(
+            model_id=model_config.model_id,
+            calibrate_probabilities=model_config.calibrate_probabilities,
+            model_repository=self
+        )
+        model.load(checkpoint_directory=checkpoint_directory)
         return model
 
-    def delete_model(self, league_name: str, model_name: str) -> bool:
-        checkpoint_filepath = f'{self._models_checkpoint_directory}/{league_name}/{model_name}'
+    def delete_model(self, model_config: ModelConfig):
+        del self._index[model_config.league_id][model_config.task.name][model_config.model_id]
+        shutil.rmtree(
+            path=f'{self._models_directory}/{model_config.league_id}/{model_config.task.name}/{model_config.model_id}',
+            ignore_errors=True
+        )
 
-        if os.path.exists(checkpoint_filepath):
-            shutil.rmtree(checkpoint_filepath) if os.path.isdir(checkpoint_filepath) else os.remove(checkpoint_filepath)
-            return True
-        else:
-            return False
+        if len(self._index[model_config.league_id][model_config.task.name]) == 0:
+            del self._index[model_config.league_id][model_config.task.name]
+            shutil.rmtree(
+                path=f'{self._models_directory}/{model_config.league_id}/{model_config.task.name}',
+                ignore_errors=True
+            )
+
+        if len(self._index[model_config.league_id]) == 0:
+            del self._index[model_config.league_id]
+            shutil.rmtree(path=f'{self._models_directory}/{model_config.league_id}', ignore_errors=True)
+
+        self._save_index()
+
+    def delete_league_models(self, league_id: str):
+        if league_id in self._index:
+            shutil.rmtree(path=f'{self._models_directory}/{league_id}', ignore_errors=True)
+            del self._index[league_id]
+            self._save_index()
